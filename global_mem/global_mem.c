@@ -2,18 +2,25 @@
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/cdev.h>
+#include <linux/device.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/string.h>
 
 #define GLOBALMEM_SIZE  0x1000
-#define MEM_CLEAR       0x01
 #define GLOBALMEM_MAJOR 230
+#define GLOBALMEM_MAGIC 'g'
+#define MEM_CLEAR       _IO(GLOBALMEM_MAGIC, 0)
+#define DEVICE_NUM      (10)
 
 static int globalmem_major = GLOBALMEM_MAJOR;
 module_param(globalmem_major, int, S_IRUGO);
 
 struct globalmem_dev {
+    dev_t devid;
     struct cdev cdev;
+    struct class *class;
+    struct device *device;
     unsigned char mem[GLOBALMEM_SIZE];
 };
 
@@ -21,7 +28,9 @@ struct globalmem_dev *globalmem_devp;
 
 static int globalmem_open(struct inode *inode, struct file *filp)
 {
-    filp->private_data = globalmem_devp;
+    struct globalmem_dev *dev = container_of(inode->i_cdev, struct globalmem_dev, cdev);
+
+    filp->private_data = dev;
     return 0;
 }
 
@@ -147,49 +156,72 @@ static void globalmem_setup_cdev(struct globalmem_dev *devp, int index)
 {
     int err = 0;
     int devno = MKDEV(globalmem_major, index);
+    char buf[32] = "global_mem";
 
-    cdev_init(&devp->cdev, &globalmem_fops);
+    devp->devid = devno;
     devp->cdev.owner = THIS_MODULE;
+    cdev_init(&devp->cdev, &globalmem_fops);
     err = cdev_add(&devp->cdev, devno, 1);
     if (err)
         printk(KERN_NOTICE "Error %d adding globalmem%d", err, index);
+    
+    sprintf(buf, "global_mem%d", index);
+    devp->class = class_create(THIS_MODULE, buf);
+    if (IS_ERR(devp->class))
+        printk(KERN_NOTICE "Error %d create class %d", err, index);
+
+    devp->device = device_create(devp->class, NULL, devp->devid, NULL, buf);
+    if (IS_ERR(devp->device))
+        printk(KERN_NOTICE "Error %d create device %d", err, index);
 }
 
 static int __init globalmem_init(void)
 {
     int ret = 0;
+    int i = 0;
     dev_t devno = MKDEV(globalmem_major, 0);
 
     if (globalmem_major)
-        ret = register_chrdev_region(devno, 1, "globalmem");
+        ret = register_chrdev_region(devno, DEVICE_NUM, "globalmem");
     else {
-        ret = alloc_chrdev_region(&devno, 0, 1, "globalmem");
+        ret = alloc_chrdev_region(&devno, 0, DEVICE_NUM, "globalmem");
         globalmem_major = MAJOR(devno);
     }
 
     if (ret < 0)
         return ret;
     
-    printk(KERN_INFO "globalmem_major = %d\n", globalmem_major);
-    globalmem_devp = kzalloc(sizeof(struct globalmem_dev), GFP_KERNEL);
+    globalmem_devp = kzalloc(sizeof(struct globalmem_dev) * DEVICE_NUM, GFP_KERNEL);
     if (!globalmem_devp) {
         ret = -ENOMEM;
         goto fail_malloc;
     }
 
-    globalmem_setup_cdev(globalmem_devp, 0);
+    for (i = 0; i < DEVICE_NUM; i++) {
+        globalmem_setup_cdev(globalmem_devp + i, i);
+    }
+
+    return 0;
 
 fail_malloc:
-    unregister_chrdev_region(devno, 1);
+    unregister_chrdev_region(devno, DEVICE_NUM);
     return ret;
 }
 
 static void __exit globalmem_exit(void)
 {
-
+    int i = 0;
+    for (i = 0; i < DEVICE_NUM; i++) {
+        cdev_del(&(globalmem_devp + i)->cdev);
+        device_destroy((globalmem_devp + i)->class, MKDEV(globalmem_major, i));
+        class_destroy((globalmem_devp + i)->class);
+    }
+    kfree(globalmem_devp);
+    unregister_chrdev_region(MKDEV(globalmem_major, 0), DEVICE_NUM);
 }
 
 module_init(globalmem_init);
 module_exit(globalmem_exit);
 
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("HuangLiang");
